@@ -1681,32 +1681,72 @@ body {
 /* Improved Mobile Layout */
 @media (max-width: 768px) {
     .global-header {
-        flex-direction: column;
-        gap: 8px;
-        padding: 8px 10px;
+        flex-direction: row;
+        flex-wrap: wrap;
+        justify-content: space-between;
+        gap: 4px;
+        padding: 6px 8px;
+        min-height: auto;
     }
     
-    .connection-status, .live-listeners {
-        font-size: 0.65rem;
+    .connection-status {
+        font-size: 0.55rem;
+        padding: 4px 8px;
+    }
+    
+    .live-listeners {
+        font-size: 0.55rem;
     }
     
     .match-info {
-        font-size: 0.8rem;
-        text-align: center;
+        font-size: 0.65rem;
+        gap: 6px;
+    }
+    
+    .match-number {
+        font-size: 0.6rem;
+    }
+    
+    .team-names {
+        font-size: 0.7rem;
     }
     
     .countdown-timer {
-        width: 100%;
-        justify-content: center;
+        width: auto;
+    }
+    
+    .countdown-label {
+        display: none;
+    }
+    
+    .countdown-time {
+        font-size: 0.75rem;
     }
     
     .widgets-row {
         flex-direction: column;
-        padding: 8px 10px;
-        gap: 8px;
+        padding: 6px 8px;
+        gap: 6px;
     }
     
     .widget {
+        min-width: 100%;
+    }
+    
+    .widget-header {
+        font-size: 0.55rem;
+        padding: 4px 8px;
+    }
+    
+    .widget-content {
+        padding: 4px 8px;
+        font-size: 0.55rem;
+    }
+    
+    .chat-main {
+        height: calc(100vh - 180px);
+        max-height: calc(100vh - 180px);
+    }
         min-width: 100%;
     }
     
@@ -1721,8 +1761,8 @@ body {
     }
     
     .chat-main {
-        height: calc(100vh - 280px);
-        max-height: calc(100vh - 280px);
+        height: calc(100vh - 200px);
+        max-height: calc(100vh - 200px);
     }
     
     .chat-container.unified-chat {
@@ -1754,23 +1794,37 @@ body {
     }
     
     .input-area.unified-input {
-        padding: 8px 10px;
-        gap: 8px;
+        padding: 6px 8px;
+        gap: 6px;
     }
     
     .input-area.unified-input .message-input {
-        padding: 10px 14px;
+        padding: 8px 12px;
         font-size: 0.85rem;
     }
     
     .input-area.unified-input .shout-btn {
-        padding: 10px 18px;
-        font-size: 0.7rem;
+        padding: 8px 14px;
+        font-size: 0.65rem;
     }
     
     .emoji-btn {
-        padding: 8px !important;
-        font-size: 1rem !important;
+        padding: 6px !important;
+        font-size: 0.9rem !important;
+    }
+    
+    .logout-btn {
+        padding: 8px 10px !important;
+    }
+    
+    .cricket-cta {
+        padding: 6px 8px;
+        gap: 4px;
+    }
+    
+    .cta-btn {
+        padding: 6px 10px;
+        font-size: 0.55rem;
     }
 }
 
