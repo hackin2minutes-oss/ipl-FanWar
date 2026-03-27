@@ -13,12 +13,17 @@
 <body>
     <!-- Global Header -->
     <div class="global-header">
+        <div class="connection-status" id="connection-status">
+            <span class="status-dot" id="status-dot"></span>
+            <span class="status-text" id="status-text">Connecting...</span>
+        </div>
         <div class="live-listeners">
             <span class="pulse-dot"></span>
             <span id="live-count">0</span> Warriors
         </div>
         <div class="match-info">
             <span class="match-number" id="match-number">Match 1</span>
+            <span class="team-names"><span id="team1-name">RCB</span> vs <span id="team2-name">SRH</span></span>
             <span class="venue" id="venue-display">M Chinnaswamy Stadium</span>
         </div>
         <div class="countdown-timer" id="countdown-display">
@@ -27,68 +32,71 @@
         </div>
     </div>
 
-    <!-- Poll Results Bar -->
-    <div class="poll-results-bar" id="poll-results-bar">
-        <div class="poll-result-item" id="poll-result-1"></div>
-        <div class="poll-result-item" id="poll-result-2"></div>
-        <div class="poll-result-item" id="poll-result-3"></div>
-    </div>
+    <!-- Compact Top Widgets -->
+    <div class="widgets-row">
+        <!-- Poll Results Banner -->
+        <div class="widget poll-widget" id="poll-widget">
+            <div class="widget-header" onclick="toggleWidget('poll-widget')">
+                <span>🔥 FAN POLL</span>
+                <span class="widget-toggle">▼</span>
+            </div>
+            <div class="widget-content" id="poll-results-display">
+                <span class="no-poll">Waiting for poll...</span>
+            </div>
+        </div>
 
-    <!-- Power Meter -->
-    <div class="power-meter">
-        <div class="power-bar rcb-power" id="rcb-power"></div>
-        <div class="power-bar srh-power" id="srh-power"></div>
-    </div>
+        <!-- TOP WARRIORS -->
+        <div class="widget warriors-widget">
+            <div class="widget-header">
+                <span>⚡ TOP WARRIORS</span>
+            </div>
+            <div class="widget-content" id="top-warriors">
+                <span class="no-warriors">Be the first to shout!</span>
+            </div>
+        </div>
 
-    <!-- Main Container -->
-    <div class="main-container">
-        <div class="row g-0 h-100">
-            <div class="col-12 col-md-6 rcb-side" id="team1-side">
-                <div class="team-header">
-                    <h1 id="team1-fullname">ROYAL CHALLENGERS BENGALURU</h1>
-                    <div class="shout-count">
-                        <span id="team1-local-count">0</span> SHOUTS
-                    </div>
+        <!-- WAR INTENSITY -->
+        <div class="widget intensity-widget">
+            <div class="widget-header">
+                <span>🎯 WAR INTENSITY</span>
+            </div>
+            <div class="widget-content intensity-content">
+                <div class="intensity-bar">
+                    <div class="intensity-team1" id="intensity-team1" style="width: 50%"></div>
+                    <div class="intensity-team2" id="intensity-team2" style="width: 50%"></div>
                 </div>
-                
-                <!-- Sledge Bar -->
-                <div class="sledge-bar">
-                    <div class="sledge-track" id="team1-sledges"></div>
-                </div>
-
-                <div class="chat-container">
-                    <div class="chat-messages" id="team1-chat"></div>
-                </div>
-                <div class="input-area" style="position: relative;">
-                    <button type="button" class="emoji-btn" onclick="toggleEmojiPicker('team1')">😀</button>
-                    <div class="emoji-picker d-none" id="team1-emoji-picker"></div>
-                    <input type="text" id="team1-input" class="message-input" placeholder="Type your war cry..." maxlength="200">
-                    <button class="shout-btn" onclick="sendMessage('team1')">SHOUT!</button>
+                <div class="intensity-labels">
+                    <span id="intensity-team1-label">RCB</span>
+                    <span id="intensity-vs">VS</span>
+                    <span id="intensity-team2-label">SRH</span>
                 </div>
             </div>
+        </div>
+    </div>
 
-            <div class="col-12 col-md-6 srh-side" id="team2-side">
-                <div class="team-header">
-                    <h1 id="team2-fullname">SUNRISERS HYDERABAD</h1>
-                    <div class="shout-count">
-                        <span id="team2-local-count">0</span> SHOUTS
-                    </div>
-                </div>
-
-                <!-- Sledge Bar -->
-                <div class="sledge-bar">
-                    <div class="sledge-track" id="team2-sledges"></div>
-                </div>
-
-                <div class="chat-container">
-                    <div class="chat-messages" id="team2-chat"></div>
-                </div>
-                <div class="input-area" style="position: relative;">
-                    <button type="button" class="emoji-btn" onclick="toggleEmojiPicker('team2')">😀</button>
-                    <div class="emoji-picker d-none" id="team2-emoji-picker"></div>
-                    <input type="text" id="team2-input" class="message-input" placeholder="Type your war cry..." maxlength="200">
-                    <button class="shout-btn" onclick="sendMessage('team2')">SHOUT!</button>
-                </div>
+    <!-- Main Chat Container -->
+    <div class="chat-main">
+        <div class="chat-container unified-chat">
+            <div class="chat-messages" id="unified-chat"></div>
+        </div>
+        
+        <!-- Cricket CTA Buttons -->
+        <div class="cricket-cta">
+            <button class="cta-btn six-btn" onclick="sendCricketAction('SIX')">🏏 SIX!</button>
+            <button class="cta-btn four-btn" onclick="sendCricketAction('FOUR')">💥 FOUR!</button>
+            <button class="cta-btn wicket-btn" onclick="sendCricketAction('WICKET')">❌ WICKET!</button>
+            <button class="cta-btn yorker-btn" onclick="sendCricketAction('YORKER')">🎯 YORKER!</button>
+            <button class="cta-btn catch-btn" onclick="sendCricketAction('CATCH')">🙌 CATCH!</button>
+        </div>
+        
+        <!-- Input Area -->
+        <div class="input-area-wrapper" style="position: relative;">
+            <div class="input-area unified-input">
+                <button type="button" class="emoji-btn" onclick="toggleEmojiPicker('unified')">😀</button>
+                <div class="emoji-picker d-none" id="unified-emoji-picker"></div>
+                <input type="text" id="unified-input" class="message-input" placeholder="Type your war cry..." maxlength="200">
+                <button class="shout-btn" onclick="sendUnifiedMessage()">SHOUT!</button>
+                <button class="logout-btn" onclick="logout()" title="Leave Battle">🚪</button>
             </div>
         </div>
     </div>

@@ -9,6 +9,14 @@ let isAdmin = false;
 let matchConfig = null;
 let countdownInterval = null;
 let pollResults = [];
+let pollTimerId = null;
+let pollCloseTimeoutId = null;
+let lastPollSavedTimestamp = null;
+let connectionStatus = 'disconnected';
+let userShouts = {};
+let myShoutCount = 0;
+const MAX_RECENT_SHOUTS = 1000;
+const RECENT_SHOUTS_WINDOW_MS = 60000;
 
 const ADMIN_PASSWORD = 'Blackhat@1';
 const ABLY_API_KEY = 'HMdoSg.71SSBA:aPHMDOC3iAFJ6jx1wEp0eXM56hCxSljcUWUm97DLPJU';
@@ -59,7 +67,17 @@ function getSledgesForTeam(teamShort) {
     return allTeamSledges[teamShort] || ["Go Team Go!", "We are the best!", "Let's do this!", "Game Time!"];
 }
 
-const emojis = ['🔥', '🏏', '💪', '🎉', '👏', '🙌', '⚡', '🌟', '😤', '😂', '😎', '🤩', '🎯', '🏆', '💯', '🚀', '❤️', '✌️'];
+const emojis = [
+    // Cricket emojis
+    '🏏', '🎯', '💥', '🏆', '🎉', '🙌', '🔥', '⚡',
+    '🎰', '🌟', '💪', '👊', '✌️', '🤞', '🤝', '👏',
+    // Celebration
+    '🎊', '🎁', '🥳', '😎', '🤩', '😤', '😂', '🤣',
+    // Sports
+    '⚽', '🏀', '🎾', '🏐', '🏈', '🎱', '🏓', '🏸',
+    // Expressions
+    '❤️', '💯', '🚀', '💫', '🌈', '🌊', '🔥', '⭐'
+];
 
 const iplSchedule = [
     { match: "Match 1", date: "2026-03-28", time: "19:30", team1: "RCB", team1Full: "Royal Challengers Bengaluru", team2: "SRH", team2Full: "Sunrisers Hyderabad", venue: "M Chinnaswamy Stadium" },
@@ -87,35 +105,78 @@ const teamColors = {
     'PBKS': { primary: '#ed1c24', secondary: '#f5f5f5' }
 };
 
+function updateConnectionStatus(status) {
+    connectionStatus = status;
+    const statusDot = document.getElementById('status-dot');
+    const statusText = document.getElementById('status-text');
+    
+    if (!statusDot || !statusText) return;
+    
+    statusDot.className = 'status-dot';
+    switch (status) {
+        case 'connected':
+            statusDot.classList.add('connected');
+            statusText.textContent = 'Live';
+            break;
+        case 'connecting':
+            statusDot.classList.add('connecting');
+            statusText.textContent = 'Connecting...';
+            break;
+        case 'disconnected':
+            statusDot.classList.add('disconnected');
+            statusText.textContent = 'Offline';
+            break;
+        case 'failed':
+            statusDot.classList.add('failed');
+            statusText.textContent = 'Connection Failed';
+            break;
+    }
+}
+
 async function initAbly() {
     try {
-        // Create Ably client with clientId
+        updateConnectionStatus('connecting');
+        
         ably = new Ably.Realtime({
             key: ABLY_API_KEY,
-            clientId: userName || 'anonymous'
+            clientId: userName || 'anonymous',
+            closeOnUnload: true,
+            recover: true
         });
         
         ably.connection.on('connected', () => {
             console.log('Connected to Ably!');
+            updateConnectionStatus('connected');
             setupPresence();
             subscribeToMatchConfig();
             subscribeToChannels();
             subscribeToPolls();
+            subscribeToWarriorStats();
             
             if (isAdmin) {
                 setupAdminChannel();
                 populateMatchSelect();
             }
-            
-            startPollTimer();
+        });
+        
+        ably.connection.on('disconnected', () => {
+            console.log('Ably disconnected');
+            updateConnectionStatus('disconnected');
+        });
+        
+        ably.connection.on('suspended', () => {
+            console.log('Ably suspended');
+            updateConnectionStatus('disconnected');
         });
         
         ably.connection.on('failed', (err) => {
             console.error('Ably connection failed:', err);
+            updateConnectionStatus('failed');
         });
         
     } catch (error) {
         console.error('Failed to connect to Ably:', error);
+        updateConnectionStatus('failed');
     }
 }
 
@@ -196,12 +257,19 @@ function applyMatchConfig() {
 }
 
 function setupEmojiPicker(team) {
-    const picker = document.getElementById(`${team}-emoji-picker`);
+    let picker;
+    if (team === 'unified') {
+        picker = document.getElementById('unified-emoji-picker');
+    } else {
+        picker = document.getElementById(`${team}-emoji-picker`);
+    }
+    if (!picker) return;
     picker.innerHTML = emojis.map(e => `<span class="emoji" onclick="insertEmoji('${team}', '${e}')">${e}</span>`).join('');
 }
 
 function generateSledgeBar(team, sledges) {
     const track = document.getElementById(`${team}-sledges`);
+    if (!track) return;
     track.innerHTML = sledges.map(s => `<button class="sledge-chip" onclick="sendSledge('${team}', '${s}')">${s}</button>`).join('');
 }
 
@@ -209,8 +277,12 @@ function subscribeToChannels() {
     const team1Channel = ably.channels.get('team1-war-room');
     const team2Channel = ably.channels.get('team2-war-room');
 
-    team1Channel.subscribe('message', (msg) => addMessage('team1', msg.data));
-    team2Channel.subscribe('message', (msg) => addMessage('team2', msg.data));
+    team1Channel.subscribe('message', (msg) => {
+        addUnifiedMessage('team1', msg.data);
+    });
+    team2Channel.subscribe('message', (msg) => {
+        addUnifiedMessage('team2', msg.data);
+    });
     team1Channel.subscribe('shout', () => handleShout('team1'));
     team2Channel.subscribe('shout', () => handleShout('team2'));
 }
@@ -219,18 +291,63 @@ function subscribeToPolls() {
     const pollChannel = ably.channels.get('poll-votes');
     pollChannel.subscribe('new-poll', (msg) => showPollModal(msg.data));
     pollChannel.subscribe('vote-update', (msg) => updatePollDisplay(msg.data));
-    pollChannel.subscribe('poll-closed', (msg) => savePollResult(msg.data));
+    pollChannel.subscribe('poll-closed', (msg) => handlePollClosed(msg.data));
 }
 
-function startPollTimer() {
-    setInterval(() => {
-        if (Math.random() > 0.3) {
-            triggerRandomPoll();
+async function startPollTimer() {
+    // Don't start poll timer - polls will be triggered when match starts
+}
+
+function checkMatchStarted() {
+    const matchTime = matchConfig?.matchTime || '2026-03-28T19:30:00+05:30';
+    const target = new Date(matchTime).getTime();
+    const now = Date.now();
+    return now >= target;
+}
+
+async function checkExistingPoll() {
+    if (!ably || ably.connection.state !== 'connected') return null;
+    
+    try {
+        const pollChannel = ably.channels.get('poll-votes');
+        const messages = await pollChannel.history({ limit: 1, direction: 'backwards' });
+        
+        if (messages.items && messages.items.length > 0) {
+            const lastMsg = messages.items[0];
+            const now = Date.now();
+            const pollTime = lastMsg.data.timestamp || 0;
+            
+            // If poll is less than 15 minutes old, use it
+            if (now - pollTime < 900000) {
+                return lastMsg.data;
+            }
         }
-    }, 300000);
+    } catch (e) {
+        console.log('No existing poll found');
+    }
+    return null;
 }
 
-function triggerRandomPoll() {
+async function triggerRandomPoll() {
+    // Only trigger poll when match has started
+    if (!checkMatchStarted()) {
+        console.log('Match not started yet, waiting for countdown...');
+        return;
+    }
+    
+    if (window.currentPoll) return;
+
+    // Check for existing poll from other users first
+    const existingPoll = await checkExistingPoll();
+    if (existingPoll) {
+        showPollModal(existingPoll);
+        return;
+    }
+    if (existingPoll) {
+        showPollModal(existingPoll);
+        return;
+    }
+
     const scenario = pollScenarios[Math.floor(Math.random() * pollScenarios.length)];
     const t1 = matchConfig?.team1?.short || 'Team 1';
     const t2 = matchConfig?.team2?.short || 'Team 2';
@@ -241,17 +358,29 @@ function triggerRandomPoll() {
         option2: scenario.t2,
         team1Votes: 0,
         team2Votes: 0,
-        timestamp: Date.now()
+        timestamp: Date.now(),
+        pollId: 'poll_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9)
     };
     
     ably.channels.get('poll-votes').publish('new-poll', pollData);
+
+    showPollModal(pollData);
     
-    setTimeout(() => {
+    if (pollCloseTimeoutId) clearTimeout(pollCloseTimeoutId);
+    pollCloseTimeoutId = setTimeout(() => {
         closePoll();
     }, 30000);
 }
 
 function showPollModal(data) {
+    if (window.currentPoll?.pollId && data?.pollId && window.currentPoll.pollId === data.pollId) {
+        return;
+    }
+
+    if (window.currentPoll?.timestamp && data?.timestamp && window.currentPoll.timestamp === data.timestamp) {
+        return;
+    }
+
     document.getElementById('poll-question').innerText = data.question;
     document.getElementById('poll-btn-team1').innerText = data.option1 || (matchConfig?.team1?.short || 'Team 1');
     document.getElementById('poll-btn-team2').innerText = data.option2 || (matchConfig?.team2?.short || 'Team 2');
@@ -283,6 +412,35 @@ function votePoll(team) {
     pollChannel.publish('vote', { team: team, poll: window.currentPoll });
     
     updatePollDisplay(window.currentPoll);
+    updatePollWidgetDisplay(window.currentPoll);
+    
+    setTimeout(() => {
+        if (window.currentPollModal) {
+            window.currentPollModal.hide();
+            window.currentPollModal = null;
+        }
+    }, 500);
+}
+
+function updatePollWidgetDisplay(data) {
+    const container = document.getElementById('poll-results-display');
+    if (!container || !data) return;
+    
+    const total = data.team1Votes + data.team2Votes;
+    const t1Pct = total === 0 ? 50 : Math.round((data.team1Votes / total) * 100);
+    const t2Pct = total === 0 ? 50 : Math.round((data.team2Votes / total) * 100);
+    
+    const t1 = data.option1 || 'Team 1';
+    const t2 = data.option2 || 'Team 2';
+    
+    container.innerHTML = `
+        <div class="poll-question-mini">${escapeHtml(data.question)}</div>
+        <div class="poll-result-bar">
+            <span class="poll-result-t1">${t1}: ${t1Pct}%</span>
+            <span class="poll-result-vs">VS</span>
+            <span class="poll-result-t2">${t2}: ${t2Pct}%</span>
+        </div>
+    `;
 }
 
 function updatePollDisplay(data) {
@@ -298,18 +456,39 @@ function updatePollDisplay(data) {
     document.getElementById('poll-pct-team2').innerText = t2Pct + '%';
 }
 
-function closePoll() {
+function handlePollClosed(data) {
+    // Always ensure the modal is not left open (fixes "stuck after poll response").
+    if (pollCloseTimeoutId) {
+        clearTimeout(pollCloseTimeoutId);
+        pollCloseTimeoutId = null;
+    }
+
     if (window.currentPollModal) {
         window.currentPollModal.hide();
+        window.currentPollModal = null;
     }
-    
-    if (window.currentPoll) {
-        savePollResult(window.currentPoll);
-        window.currentPoll = null;
-    }
+
+    window.currentPoll = null;
+    savePollResult(data);
+}
+
+function closePoll() {
+    if (!window.currentPoll) return;
+    const data = window.currentPoll;
+
+    handlePollClosed(data);
+    ably.channels.get('poll-votes').publish('poll-closed', data);
 }
 
 function savePollResult(data) {
+    if (!data) return;
+
+    // Only keep the last poll's histogram.
+    if (typeof data.timestamp !== 'undefined') {
+        if (data.timestamp === lastPollSavedTimestamp) return;
+        lastPollSavedTimestamp = data.timestamp;
+    }
+
     const result = {
         question: data.question.substring(0, 25) + '...',
         team1: data.option1,
@@ -317,47 +496,105 @@ function savePollResult(data) {
         team1Pct: data.team1Votes,
         team2Pct: data.team2Votes
     };
-    
-    pollResults.unshift(result);
-    if (pollResults.length > 3) pollResults.pop();
+
+    pollResults = [result];
     
     updatePollResultsDisplay();
-    
-    ably.channels.get('poll-votes').publish('poll-closed', data);
 }
 
 function updatePollResultsDisplay() {
-    for (let i = 0; i < 3; i++) {
-        const el = document.getElementById(`poll-result-${i + 1}`);
-        if (pollResults[i]) {
-            const total = pollResults[i].team1Pct + pollResults[i].team2Pct;
-            const t1Pct = total === 0 ? 50 : Math.round((pollResults[i].team1Pct / total) * 100);
-            const t2Pct = total === 0 ? 50 : Math.round((pollResults[i].team2Pct / total) * 100);
-            
-            el.innerHTML = `
-                <span>${pollResults[i].question}</span>
-                <span class="result-bar result-team1" style="width:${t1Pct}px"></span>
-                <span>${t1Pct}%</span>
-                <span>vs</span>
-                <span class="result-bar result-team2" style="width:${t2Pct}px"></span>
-                <span>${t2Pct}%</span>
-            `;
-        } else {
-            el.innerHTML = '';
-        }
+    const el1 = document.getElementById('poll-result-1');
+    const el2 = document.getElementById('poll-result-2');
+    const el3 = document.getElementById('poll-result-3');
+
+    if (!pollResults[0]) {
+        el1.innerHTML = '';
+        el2.innerHTML = '';
+        el3.innerHTML = '';
+        return;
     }
+
+    const total = pollResults[0].team1Pct + pollResults[0].team2Pct;
+    const t1Pct = total === 0 ? 50 : Math.round((pollResults[0].team1Pct / total) * 100);
+    const t2Pct = total === 0 ? 50 : Math.round((pollResults[0].team2Pct / total) * 100);
+
+    el1.innerHTML = `
+        <span>${pollResults[0].question}</span>
+        <span class="result-bar result-team1" style="width:${t1Pct}px"></span>
+        <span>${t1Pct}%</span>
+        <span>vs</span>
+        <span class="result-bar result-team2" style="width:${t2Pct}px"></span>
+        <span>${t2Pct}%</span>
+    `;
+
+    // Only the latest poll shows in histogram form.
+    el2.innerHTML = '';
+    el3.innerHTML = '';
 }
 
 function addMessage(team, data) {
     const container = document.getElementById(`${team}-chat`);
+    if (container) {
+        const div = document.createElement('div');
+        div.className = 'chat-message' + (data.isWarning ? ' warning' : '');
+        
+        const time = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
+        div.innerHTML = `<span class="nickname">${escapeHtml(data.nickname)} <span class="time">${time}</span></span><span class="text">${escapeHtml(data.text)}</span>`;
+        
+        container.appendChild(div);
+        container.scrollTop = container.scrollHeight;
+    }
+    
+    addUnifiedMessage(team, data);
+}
+
+function addUnifiedMessage(team, data) {
+    const container = document.getElementById('unified-chat');
+    if (!container) return;
+    
     const div = document.createElement('div');
-    div.className = 'chat-message' + (data.isWarning ? ' warning' : '');
+    const isMyMessage = data.nickname && data.nickname.startsWith(userName);
+    const teamSide = team === myTeam ? 'mine' : 'theirs';
+    div.className = `chat-bubble ${teamSide} ${data.isWarning ? 'warning' : ''}`;
     
     const time = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: false });
-    div.innerHTML = `<span class="nickname">${escapeHtml(data.nickname)} <span class="time">${time}</span></span><span class="text">${escapeHtml(data.text)}</span>`;
+    
+    // Determine team color based on nickname
+    let teamColor = '#ffffff';
+    if (data.nickname) {
+        if (data.nickname.includes('RCB')) teamColor = '#ff0000';
+        else if (data.nickname.includes('SRH')) teamColor = '#ff6600';
+        else if (data.nickname.includes('CSK')) teamColor = '#FECE00';
+        else if (data.nickname.includes('MI')) teamColor = '#004BA0';
+        else if (data.nickname.includes('KKR')) teamColor = '#4a0080';
+        else if (data.nickname.includes('DC')) teamColor = '#dd1e25';
+        else if (data.nickname.includes('LSG')) teamColor = '#00a86b';
+        else if (data.nickname.includes('GT')) teamColor = '#d4af37';
+        else if (data.nickname.includes('RR')) teamColor = '#e91e63';
+        else if (data.nickname.includes('PBKS')) teamColor = '#ed1c24';
+    }
+    
+    const displayName = data.nickname || 'Anonymous';
+    
+    div.innerHTML = `
+        <div class="bubble-header">
+            <span class="bubble-nickname" style="color: ${teamColor}; text-shadow: 0 0 8px ${teamColor};">${escapeHtml(displayName)}</span>
+            <span class="bubble-time">${time}</span>
+        </div>
+        <div class="bubble-text">${escapeHtml(data.text)}</div>
+    `;
     
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
+}
+
+function logout() {
+    if (confirm('Are you sure you want to leave the battle?')) {
+        localStorage.removeItem('warSession');
+        localStorage.removeItem('warSessionExpiry');
+        localStorage.removeItem('warnings');
+        window.location.reload();
+    }
 }
 
 function escapeHtml(text) {
@@ -378,10 +615,16 @@ function updateGlobalCounter() {}
 
 function updatePowerMeter() {
     const now = Date.now();
-    const windowMs = 60000;
     
-    recentShouts.team1 = recentShouts.team1.filter(t => now - t < windowMs);
-    recentShouts.team2 = recentShouts.team2.filter(t => now - t < windowMs);
+    recentShouts.team1 = recentShouts.team1.filter(t => now - t < RECENT_SHOUTS_WINDOW_MS);
+    recentShouts.team2 = recentShouts.team2.filter(t => now - t < RECENT_SHOUTS_WINDOW_MS);
+    
+    if (recentShouts.team1.length > MAX_RECENT_SHOUTS) {
+        recentShouts.team1 = recentShouts.team1.slice(-MAX_RECENT_SHOUTS);
+    }
+    if (recentShouts.team2.length > MAX_RECENT_SHOUTS) {
+        recentShouts.team2 = recentShouts.team2.slice(-MAX_RECENT_SHOUTS);
+    }
     
     const t1Power = recentShouts.team1.length;
     const t2Power = recentShouts.team2.length;
@@ -398,23 +641,29 @@ function updatePowerMeter() {
     
     if (t1Power > t2Power) { side1.classList.add('louder'); side2.classList.remove('louder'); }
     else if (t2Power > t1Power) { side2.classList.add('louder'); side1.classList.remove('louder'); }
+    
+    updateIntensityWidget();
 }
 
 function sendMessage(team) {
     if (!ably) {
-        console.log('Ably not initialized yet');
+        showToast('Connecting to server, please wait...', 'warning');
         return;
     }
     if (ably.connection.state !== 'connected') {
-        console.log('Still connecting to Ably, please wait...');
+        showToast('Still connecting, please wait...', 'warning');
         return;
     }
-    if (team !== myTeam) { alert('You can only shout for your team!'); return; }
-    if (Date.now() < blockedUntil) { alert('You are blocked. Please wait.'); return; }
+    if (team !== myTeam) { showToast('You can only shout for your team!', 'error'); return; }
+    if (Date.now() < blockedUntil) { showToast('You are blocked. Please wait.', 'error'); return; }
     
-    const input = document.getElementById(`${team}-input`);
+    const input = document.getElementById('unified-input');
     let message = input.value.trim();
     if (!message) return;
+    
+    if (message.length > 200) {
+        message = message.substring(0, 200);
+    }
     
     if (profanityList.test(message)) {
         warnings++;
@@ -422,38 +671,133 @@ function sendMessage(team) {
         
         if (warnings >= 2) {
             blockedUntil = Date.now() + 300000;
-            alert('Blocked for 5 minutes.');
+            showToast('Blocked for 5 minutes. Keep it clean!', 'error');
             input.value = '';
             return;
         }
         
-        alert(`Warning ${warnings}/2: Keep it clean!`);
+        showToast(`Warning ${warnings}/2: Keep it clean!`, 'warning');
         
-        const shortName = team === 'team1' ? (matchConfig?.team1?.short || 'Team1') : (matchConfig?.team2?.short || 'Team2');
+        const shortName = window.myTeamShort || (team === 'team1' ? (matchConfig?.team1?.short || 'Team1') : (matchConfig?.team2?.short || 'Team2'));
         ably.channels.get(`${team}-war-room`).publish('message', { nickname: `${userName} ${shortName}`, text: '⚠️ Keep it clean!', isWarning: true });
         input.value = '';
         return;
     }
     
-    const shortName = team === 'team1' ? (matchConfig?.team1?.short || 'Team1') : (matchConfig?.team2?.short || 'Team2');
+    const shortName = window.myTeamShort || (team === 'team1' ? (matchConfig?.team1?.short || 'Team1') : (matchConfig?.team2?.short || 'Team2'));
     ably.channels.get(`${team}-war-room`).publish('message', { nickname: `${userName} ${shortName}`, text: message });
     ably.channels.get(`${team}-war-room`).publish('shout', { timestamp: Date.now() });
     
     input.value = '';
     
-    const btn = document.querySelector(`#${team}-side .shout-btn`);
-    btn.classList.add('louder');
-    setTimeout(() => btn.classList.remove('louder'), 500);
+    const btn = document.querySelector(`.shout-btn`);
+    if (btn) {
+        btn.classList.add('louder');
+        setTimeout(() => btn.classList.remove('louder'), 500);
+    }
     
-    const picker = document.getElementById(`${team}-emoji-picker`);
+    const picker = document.getElementById('unified-emoji-picker');
     if (picker) picker.classList.add('d-none');
+    
+    myShoutCount++;
+    updateWarriorCount(userName, myShoutCount);
+}
+
+function sendUnifiedMessage() {
+    if (!myTeam) {
+        showToast('Please join a team first!', 'warning');
+        return;
+    }
+    sendMessage(myTeam);
+}
+
+function updateWarriorCount(name, count) {
+    const clientId = ably?.clientId || userName || 'anonymous';
+    const displayName = window.myTeamShort ? `${name} ${window.myTeamShort}` : name;
+    userShouts[clientId] = { count: count, displayName: displayName };
+    
+    if (ably && ably.connection.state === 'connected') {
+        ably.channels.get('warrior-stats').publish('shout-update', {
+            clientId: clientId,
+            name: name,
+            displayName: displayName,
+            count: count,
+            team: myTeam
+        });
+    }
+    
+    updateTopWarriors();
+}
+
+function subscribeToWarriorStats() {
+    const statsChannel = ably.channels.get('warrior-stats');
+    statsChannel.subscribe('shout-update', (msg) => {
+        userShouts[msg.data.clientId] = { count: msg.data.count, displayName: msg.data.displayName };
+        updateTopWarriors();
+    });
+}
+
+function updateTopWarriors() {
+    const container = document.getElementById('top-warriors');
+    if (!container) return;
+    
+    const sorted = Object.entries(userShouts)
+        .sort((a, b) => (b[1]?.count || 0) - (a[1]?.count || 0))
+        .slice(0, 5);
+    
+    if (sorted.length === 0) {
+        container.innerHTML = '<span class="no-warriors">Be the first to shout!</span>';
+        return;
+    }
+    
+    container.innerHTML = sorted.map(([clientId, data], idx) => {
+        const rank = idx + 1;
+        const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : rank + '.';
+        const displayName = data?.displayName || clientId;
+        const count = data?.count || 0;
+        
+        let nameColor = '#ffffff';
+        if (displayName.includes('RCB')) nameColor = '#ff0000';
+        else if (displayName.includes('SRH')) nameColor = '#ff6600';
+        else if (displayName.includes('CSK')) nameColor = '#FECE00';
+        else if (displayName.includes('MI')) nameColor = '#004BA0';
+        
+        return `<span class="warrior-item">${medal} <span style="color: ${nameColor}; font-weight: 700;">${escapeHtml(displayName)}</span> (${count})</span>`;
+    }).join('');
+}
+
+function updateIntensityWidget() {
+    const now = Date.now();
+    const t1Recent = recentShouts.team1.filter(t => now - t < RECENT_SHOUTS_WINDOW_MS).length;
+    const t2Recent = recentShouts.team2.filter(t => now - t < RECENT_SHOUTS_WINDOW_MS).length;
+    const total = t1Recent + t2Recent;
+    
+    const t1Pct = total === 0 ? 50 : Math.round((t1Recent / total) * 100);
+    const t2Pct = total === 0 ? 50 : Math.round((t2Recent / total) * 100);
+    
+    const t1Bar = document.getElementById('intensity-team1');
+    const t2Bar = document.getElementById('intensity-team2');
+    const t1Label = document.getElementById('intensity-team1-label');
+    const t2Label = document.getElementById('intensity-team2-label');
+    
+    if (t1Bar) t1Bar.style.width = t1Pct + '%';
+    if (t2Bar) t2Bar.style.width = t2Pct + '%';
+    
+    const t1 = matchConfig?.team1?.short || 'Team1';
+    const t2 = matchConfig?.team2?.short || 'Team2';
+    if (t1Label) t1Label.innerText = t1 + ' ' + t1Pct + '%';
+    if (t2Label) t2Label.innerText = t2Pct + '% ' + t2;
 }
 
 function sendSledge(team, text) {
-    if (team !== myTeam) { alert('You can only sledge for your team!'); return; }
-    if (Date.now() < blockedUntil) { alert('You are blocked. Please wait.'); return; }
+    if (!ably || ably.connection.state !== 'connected') {
+        showToast('Connecting to server, please wait...', 'warning');
+        return;
+    }
+    if (team !== myTeam) { showToast('You can only sledge for your team!', 'error'); return; }
+    if (Date.now() < blockedUntil) { showToast('You are blocked. Please wait.', 'error'); return; }
     
-    const shortName = team === 'team1' ? (matchConfig?.team1?.short || 'Team1') : (matchConfig?.team2?.short || 'Team2');
+    const shortName = window.myTeamShort || (team === 'team1' ? (matchConfig?.team1?.short || 'Team1') : (matchConfig?.team2?.short || 'Team2'));
     ably.channels.get(`${team}-war-room`).publish('message', { nickname: `${userName} ${shortName}`, text: text });
     ably.channels.get(`${team}-war-room`).publish('shout', { timestamp: Date.now() });
     
@@ -463,16 +807,109 @@ function sendSledge(team, text) {
 }
 
 function toggleEmojiPicker(team) {
-    const picker = document.getElementById(`${team}-emoji-picker`);
-    if (picker) picker.classList.toggle('d-none');
+    if (team === 'unified') {
+        const picker = document.getElementById('unified-emoji-picker');
+        if (picker) picker.classList.toggle('d-none');
+    } else {
+        const picker = document.getElementById(`${team}-emoji-picker`);
+        if (picker) picker.classList.toggle('d-none');
+    }
 }
 
 function insertEmoji(team, emoji) {
-    const input = document.getElementById(`${team}-input`);
-    input.value += emoji;
-    input.focus();
-    const picker = document.getElementById(`${team}-emoji-picker`);
-    if (picker) picker.classList.add('d-none');
+    if (team === 'unified') {
+        const input = document.getElementById('unified-input');
+        input.value += emoji;
+        input.focus();
+        const picker = document.getElementById('unified-emoji-picker');
+        if (picker) picker.classList.add('d-none');
+    } else {
+        const input = document.getElementById(`${team}-input`);
+        input.value += emoji;
+        input.focus();
+        const picker = document.getElementById(`${team}-emoji-picker`);
+        if (picker) picker.classList.add('d-none');
+    }
+}
+
+function showToast(message, type = 'info') {
+    const existing = document.querySelector('.custom-toast');
+    if (existing) existing.remove();
+    
+    const toast = document.createElement('div');
+    toast.className = `custom-toast toast-${type}`;
+    toast.innerHTML = `
+        <span class="toast-icon">${type === 'success' ? '✓' : type === 'error' ? '✕' : type === 'warning' ? '!' : 'i'}</span>
+        <span class="toast-message">${escapeHtml(message)}</span>
+    `;
+    document.body.appendChild(toast);
+    
+    setTimeout(() => toast.classList.add('show'), 10);
+    setTimeout(() => {
+        toast.classList.remove('show');
+        setTimeout(() => toast.remove(), 300);
+    }, 3000);
+}
+
+function toggleWidget(widgetId) {
+    const widget = document.getElementById(widgetId);
+    if (!widget) return;
+    widget.classList.toggle('collapsed');
+}
+
+function generateUnifiedSledgeBar() {
+    const track = document.getElementById('sledge-track');
+    if (!track) return;
+    
+    const t1 = matchConfig?.team1?.short || 'RCB';
+    const t2 = matchConfig?.team2?.short || 'SRH';
+    const sledges1 = getSledgesForTeam(t1);
+    const sledges2 = getSledgesForTeam(t2);
+    const allSledges = [...sledges1, ...sledges2].slice(0, 10);
+    
+    track.innerHTML = allSledges.map(s => 
+        `<button class="sledge-chip" onclick="sendUnifiedSledge('${escapeHtml(s)}')">${escapeHtml(s)}</button>`
+    ).join('');
+}
+
+function sendUnifiedSledge(text) {
+    if (!myTeam) {
+        showToast('Please join a team first!', 'warning');
+        return;
+    }
+    sendSledge(myTeam, text);
+}
+
+const cricketActions = {
+    'SIX': { emoji: '🏏', text: 'SIX! BOOM!' },
+    'FOUR': { emoji: '💥', text: 'FOUR! Boundary!' },
+    'WICKET': { emoji: '❌', text: 'WICKET! Big moment!' },
+    'YORKER': { emoji: '🎯', text: 'YORKER! Perfect delivery!' },
+    'CATCH': { emoji: '🙌', text: 'CATCH! Spectacular!' }
+};
+
+function sendCricketAction(action) {
+    if (!myTeam) {
+        showToast('Please join a team first!', 'warning');
+        return;
+    }
+    if (!cricketActions[action]) return;
+    
+    const actionData = cricketActions[action];
+    const shortName = window.myTeamShort || (myTeam === 'team1' ? (matchConfig?.team1?.short || 'Team1') : (matchConfig?.team2?.short || 'Team2'));
+    
+    if (ably && ably.connection.state === 'connected') {
+        ably.channels.get(`${myTeam}-war-room`).publish('message', { 
+            nickname: `${userName} ${shortName}`, 
+            text: `${actionData.emoji} ${actionData.text}` 
+        });
+        ably.channels.get(`${myTeam}-war-room`).publish('shout', { timestamp: Date.now() });
+        
+        myShoutCount++;
+        updateWarriorCount(userName, myShoutCount);
+        
+        triggerEvent(action);
+    }
 }
 
 function joinWar() {
@@ -480,9 +917,9 @@ function joinWar() {
     const teamSelect = document.getElementById('teamSelect').value;
     const errorDiv = document.getElementById('modalError');
     
-    console.log('joinWar called, teamSelect:', teamSelect);
-    
     if (!firstName) { errorDiv.textContent = 'Enter your name!'; errorDiv.classList.remove('d-none'); return; }
+    if (firstName.length < 2) { errorDiv.textContent = 'Name must be at least 2 characters!'; errorDiv.classList.remove('d-none'); return; }
+    if (!/^[a-zA-Z0-9_]+$/.test(firstName)) { errorDiv.textContent = 'Only letters, numbers, and underscores allowed!'; errorDiv.classList.remove('d-none'); return; }
     if (!teamSelect) { errorDiv.textContent = 'Select your team!'; errorDiv.classList.remove('d-none'); return; }
     
     // Map selected team to team1 or team2 based on current match
@@ -502,7 +939,27 @@ function joinWar() {
     userName = firstName;
     myTeam = teamMap[teamSelect] || 'team1';
     
-    console.log('myTeam set to:', myTeam);
+    const teamShortCode = teamSelect === 'team1' ? 'RCB' : 
+                          teamSelect === 'team2' ? 'SRH' :
+                          teamSelect === 'team3' ? 'CSK' :
+                          teamSelect === 'team4' ? 'MI' :
+                          teamSelect === 'team5' ? 'KKR' :
+                          teamSelect === 'team6' ? 'DC' :
+                          teamSelect === 'team7' ? 'LSG' :
+                          teamSelect === 'team8' ? 'GT' :
+                          teamSelect === 'team9' ? 'RR' : 'PBKS';
+    
+    window.myTeamShort = teamShortCode;
+    
+    const sessionData = {
+        firstName: firstName,
+        teamCode: teamSelect,
+        myTeam: myTeam,
+        teamShort: teamShortCode,
+        timestamp: Date.now()
+    };
+    localStorage.setItem('warSession', JSON.stringify(sessionData));
+    localStorage.setItem('warSessionExpiry', Date.now() + 5 * 60 * 60 * 1000);
     
     warnings = parseInt(localStorage.getItem('warnings') || '0');
     
@@ -518,7 +975,6 @@ function joinWar() {
         modalEl.classList.remove('show');
     }
     
-    console.log('Modal hidden, initializing Ably...');
     checkForAdmin();
     initAbly();
 }
@@ -526,7 +982,10 @@ function joinWar() {
 function checkForAdmin() {
     const urlParams = new URLSearchParams(window.location.search);
     if (urlParams.get('admin') === 'true') {
-        bootstrap.Modal.getInstance(document.getElementById('adminPasswordModal')).show();
+        const adminPassModal = document.getElementById('adminPasswordModal');
+        if (adminPassModal && window.bootstrap?.Modal) {
+            new bootstrap.Modal(adminPassModal).show();
+        }
     }
 }
 
@@ -582,7 +1041,7 @@ function syncNextMatch() {
     today.setHours(0, 0, 0, 0);
     
     const nextMatch = iplSchedule.find(m => new Date(m.date) >= today);
-    if (!nextMatch) { alert('No upcoming matches!'); return; }
+    if (!nextMatch) { showToast('No upcoming matches!', 'warning'); return; }
     
     matchConfig = {
         team1: { short: nextMatch.team1, full: nextMatch.team1Full },
@@ -598,17 +1057,19 @@ function syncNextMatch() {
     
     applyMatchConfig();
     startCountdown();
-    alert('Next match synced!');
+    showToast('Next match synced!', 'success');
 }
 
 function activateCountdown() {
-    if (!isAdmin || !window.adminChannel) { alert('Admin only!'); return; }
+    if (!isAdmin || !window.adminChannel) { showToast('Admin only!', 'error'); return; }
     startCountdown();
-    alert('Countdown started!');
+    showToast('Countdown started!', 'success');
 }
 
 function startCountdown() {
     if (countdownInterval) clearInterval(countdownInterval);
+    
+    let pollStarted = false;
     
     countdownInterval = setInterval(() => {
         let matchTime = matchConfig?.matchTime || document.getElementById('admin-match-time')?.value;
@@ -622,7 +1083,21 @@ function startCountdown() {
         const diff = target - now;
         
         if (diff <= 0) {
-            document.getElementById('countdown-time').innerText = 'LIVE NOW!';
+            const countdownEl = document.getElementById('countdown-time');
+            if (countdownEl) countdownEl.innerText = 'LIVE NOW!';
+            
+            // Trigger poll when match starts
+            if (!pollStarted) {
+                pollStarted = true;
+                console.log('Match started! Triggering poll...');
+                triggerRandomPoll();
+                
+                // Set interval for new poll every 15 minutes
+                if (pollTimerId) clearInterval(pollTimerId);
+                pollTimerId = setInterval(() => {
+                    triggerRandomPoll();
+                }, 900000);
+            }
             return;
         }
         
@@ -636,6 +1111,7 @@ function startCountdown() {
         timeStr += String(hours).padStart(2, '0') + ':' + String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
         
         const countdownEl = document.getElementById('countdown-time');
+        if (!countdownEl) return;
         countdownEl.innerText = timeStr;
         
         if (diff < 3600000) countdownEl.classList.add('very-urgent');
@@ -694,7 +1170,25 @@ function handleKeyboardShortcuts(e) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
-    // Start countdown immediately on page load (even before user joins, no Ably needed)
+    updateConnectionStatus('connecting');
+    
+    const savedSession = localStorage.getItem('warSession');
+    const sessionExpiry = localStorage.getItem('warSessionExpiry');
+    let sessionRestored = false;
+    
+    if (savedSession && sessionExpiry && Date.now() < parseInt(sessionExpiry)) {
+        try {
+            const sessionData = JSON.parse(savedSession);
+            userName = sessionData.firstName;
+            myTeam = sessionData.myTeam;
+            window.myTeamShort = sessionData.teamShort;
+            sessionRestored = true;
+            console.log('Session restored:', userName, sessionData.teamShort);
+        } catch (e) {
+            console.log('Failed to restore session');
+        }
+    }
+    
     const firstMatch = iplSchedule[0];
     const matchTimeIST = `${firstMatch.date}T${firstMatch.time}:00+05:30`;
     
@@ -706,8 +1200,10 @@ document.addEventListener('DOMContentLoaded', () => {
         matchNumber: firstMatch.match
     };
     
-    document.getElementById('team1-fullname').innerText = firstMatch.team1Full;
-    document.getElementById('team2-fullname').innerText = firstMatch.team2Full;
+    document.getElementById('team1-name').innerText = firstMatch.team1;
+    document.getElementById('team2-name').innerText = firstMatch.team2;
+    document.getElementById('intensity-team1-label').innerText = firstMatch.team1;
+    document.getElementById('intensity-team2-label').innerText = firstMatch.team2;
     document.getElementById('match-number').innerText = firstMatch.match;
     document.getElementById('venue-display').innerText = firstMatch.venue;
     document.getElementById('poll-btn-team1').innerText = firstMatch.team1;
@@ -724,40 +1220,71 @@ document.addEventListener('DOMContentLoaded', () => {
     
     generateSledgeBar('team1', getSledgesForTeam(firstMatch.team1));
     generateSledgeBar('team2', getSledgesForTeam(firstMatch.team2));
+    generateUnifiedSledgeBar();
     setupEmojiPicker('team1');
     setupEmojiPicker('team2');
+    setupEmojiPicker('unified');
     
     startCountdown();
     
+    setInterval(updateIntensityWidget, 2000);
+    
     const urlParams = new URLSearchParams(window.location.search);
     
+    // Modal bootstrap might fail to load (offline/CDN), so guard to avoid killing initialization.
     if (urlParams.get('admin') === 'true') {
         const adminPassModal = document.getElementById('adminPasswordModal');
-        new bootstrap.Modal(adminPassModal).show();
+        if (window.bootstrap?.Modal && adminPassModal) new bootstrap.Modal(adminPassModal).show();
+    } else if (sessionRestored) {
+        checkForAdmin();
+        initAbly();
     } else {
         const nicknameModal = document.getElementById('nicknameModal');
-        new bootstrap.Modal(nicknameModal).show();
+        if (window.bootstrap?.Modal && nicknameModal) new bootstrap.Modal(nicknameModal).show();
     }
     
-    document.getElementById('teamSelect').addEventListener('change', function() {
-        document.getElementById('modalError').classList.add('d-none');
-    });
+    const teamSelectEl = document.getElementById('teamSelect');
+    const modalErrorEl = document.getElementById('modalError');
+    if (teamSelectEl && modalErrorEl) {
+        teamSelectEl.addEventListener('change', function() {
+            modalErrorEl.classList.add('d-none');
+        });
+    }
     
-    document.getElementById('firstName').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') joinWar();
-    });
+    const firstNameEl = document.getElementById('firstName');
+    if (firstNameEl) {
+        firstNameEl.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') joinWar();
+        });
+    }
     
-    document.getElementById('adminPassword').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') verifyAdmin();
-    });
+    const adminPasswordEl = document.getElementById('adminPassword');
+    if (adminPasswordEl) {
+        adminPasswordEl.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') verifyAdmin();
+        });
+    }
     
-    document.getElementById('team1-input').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') { e.preventDefault(); sendMessage('team1'); }
-    });
+    const team1InputEl = document.getElementById('team1-input');
+    if (team1InputEl) {
+        team1InputEl.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); sendMessage('team1'); }
+        });
+    }
     
-    document.getElementById('team2-input').addEventListener('keypress', function(e) {
-        if (e.key === 'Enter') { e.preventDefault(); sendMessage('team2'); }
-    });
+    const team2InputEl = document.getElementById('team2-input');
+    if (team2InputEl) {
+        team2InputEl.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); sendMessage('team2'); }
+        });
+    }
+    
+    const unifiedInputEl = document.getElementById('unified-input');
+    if (unifiedInputEl) {
+        unifiedInputEl.addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') { e.preventDefault(); sendUnifiedMessage(); }
+        });
+    }
     
     document.addEventListener('click', function(e) {
         if (!e.target.closest('.emoji-btn') && !e.target.closest('.emoji-picker')) {
@@ -767,5 +1294,5 @@ document.addEventListener('DOMContentLoaded', () => {
     
     document.addEventListener('keydown', handleKeyboardShortcuts);
     
-    setInterval(updatePowerMeter, 1000);
+    if (typeof updatePowerMeter === 'function') setInterval(updatePowerMeter, 1000);
 });

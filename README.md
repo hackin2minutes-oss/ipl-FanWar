@@ -5,7 +5,7 @@ A real-time fan war web app for IPL 2026. Join the battle, shout for your team, 
 ## Features
 
 - ⚡ **Real-time Chat** - Split-screen chat for two teams
-- 📊 **Fan Polls** - 20+ cricket scenarios every 5 minutes
+- 📊 **Fan Polls** - 20+ cricket scenarios every 15 minutes
 - ⏱️ **Countdown Timer** - Auto-starts for match day
 - 🔥 **Sledge Bar** - Quick team-specific phrases
 - 👥 **Live Warriors** - See who's online
